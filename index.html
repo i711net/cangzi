@@ -15,6 +15,8 @@
 <label for="source">导入 TXT（UTF-8）</label><input type="file" id="source" accept=".txt,text/plain">
 <label for="secret">秘密正文</label><textarea id="secret" rows="3" placeholder="这里写接收方解锁后要看到的内容。"></textarea>
 <label for="writePassword">设置密码</label><input type="password" id="writePassword" autocomplete="new-password" placeholder="至少 12 个字符；建议用长口令">
+<label for="mode">分享方式</label>
+<select id="mode"><option value="invisible">隐形正文（建议通过 TXT 文件发送）</option><option value="chat">微信 / QQ 文本（文末有可见分享码）</option></select>
 <button class="primary" id="encode">生成带密文章</button>
 <label for="encoded">带密文章</label><textarea id="encoded" rows="4" readonly></textarea>
 <button id="copy" disabled>复制带密文章</button><button id="save" disabled>保存 TXT</button>
@@ -22,7 +24,7 @@
 </section>
 <section>
 <h2>检查与解读</h2>
-<label for="received">收到的文章</label><textarea id="received" rows="5" placeholder="粘贴完整文章，或者导入带密 TXT。"></textarea>
+<label for="received">收到的文章或分享码</label><textarea id="received" rows="5" placeholder="粘贴完整文章或完整分享码，或者导入带密 TXT。"></textarea>
 <label for="incoming">导入带密 TXT（UTF-8）</label><input type="file" id="incoming" accept=".txt,text/plain">
 <div><button id="check">检查是否有密文</button></div>
 <label for="readPassword">解读密码</label><input type="password" id="readPassword" autocomplete="off">
@@ -30,7 +32,7 @@
 <p id="readStatus" class="status" role="status"></p>
 <label for="revealed">解锁后的秘密</label><textarea id="revealed" rows="4" readonly></textarea>
 </section>
-<details><summary>复制到哪里可以保留秘密？</summary><p>只有保留原始 Unicode 文本的复制才能传递秘密。聊天软件、网页编辑器可能过滤不可见字符；截图和 OCR 无法保留。建议从接收处复制回来，粘贴到「检查与解读」并试解锁一次。重要内容可以直接发送导出的 TXT 文件。</p><p>本页不联网、不保存密码。检查功能能找出密文；真正的保护来自密码和加密。识别格式的其他工具也可以尝试读取，所以请用长且独立的口令，并单独把口令交给接收方。</p></details>
+<details><summary>微信和 QQ 怎么发？</summary><p>直接发聊天文字时，选择「微信 / QQ 文本」。请保留文末完整的 CZ1 分享码；接收方可以粘贴整篇，也可以只粘贴完整码。长消息遇到截断时，请改发 TXT 文件。</p><p>想保持文章外观不变，选择「隐形正文」并保存为 TXT，在聊天里作为文件发送。接收方下载后直接导入 TXT，避免从聊天预览复制。截图或 OCR 无法恢复隐形密文。</p><p>本页不联网、不保存密码。分享码是密文，请使用长且独立的口令，并单独把口令交给接收方。</p></details>
 </main>
 <script>
 'use strict';
@@ -40,12 +42,29 @@ const start = '\u2064\u2061\u2064\u2061', end = '\u2061\u2064\u2061\u2064';
 const magic = te.encode('CZ01');
 const maxSecret = 8192, overhead = 48;
 const packetPattern = new RegExp(start+'(['+alphabet+']+)'+end, 'g');
+const chatPattern = /\[CZ1:([A-Za-z0-9_\- \r\n\t]+)\]/g;
+function packChat(bytes) {
+  return '[CZ1:' + btoa(String.fromCharCode(...bytes)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'') + ']';
+}
+function validatePacket(bytes) {
+  if (bytes.length <= overhead || bytes.length > overhead+maxSecret) throw Error('密文长度不正确，可能在复制时受损。');
+  if (!magic.every((n,i)=>n===bytes[i])) throw Error('无法识别密文格式。');
+  return bytes;
+}
 function pack(bytes) {
   return start + Array.from(bytes, x => alphabet[x>>6]+alphabet[(x>>4)&3]+alphabet[(x>>2)&3]+alphabet[x&3]).join('') + end;
 }
 function extract(article) {
+  const chatMatches = article.matchAll(chatPattern);
+  const chat = chatMatches.next();
   const matches = article.matchAll(packetPattern);
   const first = matches.next();
+  if (!chat.done) {
+    if (!chatMatches.next().done || !first.done) throw Error('文章内有多段密文。请分别载入原始文章或分享码。');
+    const data = chat.value[1].replace(/[ \r\n\t]/g,'');
+    if (data.length > Math.ceil((overhead+maxSecret)*4/3) || data.length%4===1) throw Error('分享码长度不正确，请检查是否完整。');
+    return validatePacket(Uint8Array.from(atob(data.replace(/-/g,'+').replace(/_/g,'/')),x=>x.charCodeAt(0)));
+  }
   if (first.done) throw Error('未找到完整密文。请粘贴整篇，或索取原始 TXT。');
   if (!matches.next().done) throw Error('文章内有多段密文。请分别载入原始文章。');
   const data = first.value[1];
@@ -54,17 +73,16 @@ function extract(article) {
   for(let i=0;i<bytes.length;i++) {
     for(let j=0;j<4;j++) bytes[i] = 4*bytes[i] + alphabet.indexOf(data[4*i+j]);
   }
-  if (!magic.every((n,i)=>n===bytes[i])) throw Error('无法识别密文格式。');
-  return bytes;
+  return validatePacket(bytes);
 }
 async function derive(password,salt,usage) {
   if (!globalThis.crypto?.subtle) throw Error('当前浏览器无法使用本机加密，请用 Edge 或 Chrome 打开本页。');
   const root = await crypto.subtle.importKey('raw',te.encode(password),'PBKDF2',false,['deriveKey']);
   return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:600000,hash:'SHA-256'},root,{name:'AES-GCM',length:256},false,[usage]);
 }
-async function hide(article, secret, password) {
+async function hide(article, secret, password, mode='invisible') {
   if (!article.trim()) throw Error('请输入公开文章。');
-  if (article.includes(start)) throw Error('文章已含密文标记，请换用公开原稿。');
+  if (article.includes(start) || article.includes('[CZ1:')) throw Error('文章已含密文标记，请换用公开原稿。');
   const payload = te.encode(secret);
   if (!payload.length || payload.length > maxSecret) throw Error('秘密正文须为 1 至 8192 个 UTF-8 字节，常见汉字约占 3 字节。');
   if (Array.from(password).length < 12) throw Error('请设置至少 12 个字符的密码。');
@@ -75,6 +93,7 @@ async function hide(article, secret, password) {
   const encrypted = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv:header.subarray(20),additionalData:header},key,payload));
   const bytes = new Uint8Array(header.length+encrypted.length);
   bytes.set(header);bytes.set(encrypted,header.length);
+  if(mode==='chat') return article+'\n\n'+packChat(bytes);
   const pos = article.search(/[。！？\n]/);
   const insertion = pos >= 0 ? pos : Array.from(article.trimStart())[0].length + article.length-article.trimStart().length;
   return article.slice(0,insertion)+pack(bytes)+article.slice(insertion);
@@ -110,12 +129,13 @@ function encoded(value) {
 }
 let writeVersion=0,readVersion=0;
 for(const id of ['cover','secret','writePassword']) $(id).oninput=()=>{writeVersion++;encoded('');status('writeStatus','');};
+$('mode').onchange=()=>{writeVersion++;encoded('');status('writeStatus','');};
 for(const id of ['received','readPassword']) $(id).addEventListener('input',()=>readVersion++);
 $('encode').onclick=async () => {
   const version=writeVersion;
   $('encode').disabled=true;encoded('');status('writeStatus','正在加密…');
   try {
-    const result=await hide($('cover').value,$('secret').value,$('writePassword').value);
+    const result=await hide($('cover').value,$('secret').value,$('writePassword').value,$('mode').value);
     if(version===writeVersion){encoded(result);status('writeStatus','已生成。请复制带密文章，或保存为 TXT。');}
   } catch(e){if(version===writeVersion)status('writeStatus',e.message,true);}
   finally{$('encode').disabled=false;}
