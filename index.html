@@ -16,7 +16,8 @@
 <label for="secret">秘密正文</label><textarea id="secret" rows="3" placeholder="这里写接收方解锁后要看到的内容。"></textarea>
 <label for="writePassword">设置密码</label><input type="password" id="writePassword" autocomplete="new-password" placeholder="至少 12 个字符；建议用长口令">
 <label for="mode">分享方式</label>
-<select id="mode"><option value="invisible">隐形正文（建议通过 TXT 文件发送）</option><option value="chat">微信 / QQ 文本（文末有可见分享码）</option></select>
+<select id="mode"><option value="words">正文措辞（适合复制到微信 / QQ）</option><option value="invisible">隐形正文（建议通过 TXT 文件发送）</option></select>
+<p><small id="capacity"></small></p>
 <button class="primary" id="encode">生成带密文章</button>
 <label for="encoded">带密文章</label><textarea id="encoded" rows="4" readonly></textarea>
 <button id="copy" disabled>复制带密文章</button><button id="save" disabled>保存 TXT</button>
@@ -24,7 +25,7 @@
 </section>
 <section>
 <h2>检查与解读</h2>
-<label for="received">收到的文章或分享码</label><textarea id="received" rows="5" placeholder="粘贴完整文章或完整分享码，或者导入带密 TXT。"></textarea>
+<label for="received">收到的文章</label><textarea id="received" rows="5" placeholder="粘贴完整文章，或者导入带密 TXT。"></textarea>
 <label for="incoming">导入带密 TXT（UTF-8）</label><input type="file" id="incoming" accept=".txt,text/plain">
 <div><button id="check">检查是否有密文</button></div>
 <label for="readPassword">解读密码</label><input type="password" id="readPassword" autocomplete="off">
@@ -32,7 +33,7 @@
 <p id="readStatus" class="status" role="status"></p>
 <label for="revealed">解锁后的秘密</label><textarea id="revealed" rows="4" readonly></textarea>
 </section>
-<details><summary>微信和 QQ 怎么发？</summary><p>直接发聊天文字时，选择「微信 / QQ 文本」。请保留文末完整的 CZ1 分享码；接收方可以粘贴整篇，也可以只粘贴完整码。长消息遇到截断时，请改发 TXT 文件。</p><p>想保持文章外观不变，选择「隐形正文」并保存为 TXT，在聊天里作为文件发送。接收方下载后直接导入 TXT，避免从聊天预览复制。截图或 OCR 无法恢复隐形密文。</p><p>本页不联网、不保存密码。分享码是密文，请使用长且独立的口令，并单独把口令交给接收方。</p></details>
+<details><summary>微信和 QQ 怎么发？</summary><p>选择「正文措辞」，生成后复制整篇文章。工具用可互换的中文短语携带密文。请先读一遍，确认语气和意思合适。接收方粘贴完整正文并输入密码。删句、改词或只复制一部分都可能导致解不开。</p><p>可替换词句太少时，需要补充原稿或缩短秘密。隐形正文模式适合以 TXT 文件发送，接收方下载后直接导入。</p><p>本页在浏览器内加密解密，请使用长且独立的口令，并单独把口令交给接收方。</p></details>
 </main>
 <script>
 'use strict';
@@ -43,8 +44,53 @@ const magic = te.encode('CZ01');
 const maxSecret = 8192, overhead = 48;
 const packetPattern = new RegExp(start+'(['+alphabet+']+)'+end, 'g');
 const chatPattern = /\[CZ1:([A-Za-z0-9_\- \r\n\t]+)\]/g;
-function packChat(bytes) {
-  return '[CZ1:' + btoa(String.fromCharCode(...bytes)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'') + ']';
+// Keep these pairs and their order stable so published articles remain readable.
+const wordingPairs = [
+  ['换句话说','换个说法'], ['与此同时','同一时间'], ['从那以后','从那之后'],
+  ['举个例子','举个事例'], ['比方来说','比如说'], ['总的来说','整体来看'],
+  ['一开始的时候','刚开始的时候'], ['等到那时候','等到那个时候'],
+  ['在这个过程中','在这一过程中'], ['在那段时间里','在那一段时间里'],
+  ['经过一段时间','过了一段时间'], ['没过多久','没过多长时间'],
+  ['接下来的几天','之后的几天'], ['过了好一会儿','过了好一阵子'],
+  ['下班以后','下班之后'], ['吃完饭以后','吃完饭之后'], ['回到家以后','回到家之后'],
+  ['走了一小段路','走了一小截路'], ['停下了脚步','停住了脚步'],
+  ['仔细想了想','认真想了想'], ['简单说了几句','简单讲了几句'],
+  ['提前说一声','事先说一声'], ['抽空看一看','抽空看一下'],
+  ['找个时间聊聊','找个时间聊一聊'], ['再确认一下','再确认一遍'],
+  ['把事情说清楚','把事情讲清楚'], ['把情况说清楚','把情况讲清楚'],
+  ['有机会的话','如果有机会'], ['有需要的话','如果有需要'],
+  ['到时候再说','到时候再谈'], ['等有空了','等有时间了'],
+  ['一块儿过去','一起过去'], ['一块儿回来','一起回来'],
+  ['街道旁边','街道边上'], ['附近的地方','周围的地方'],
+  ['周末的时候','到了周末的时候'], ['过一会儿','过一阵子']
+];
+const wordingIndex = new Map(wordingPairs.flatMap(pair => pair.map(word => [word,pair])));
+const wordingPattern = new RegExp([...wordingIndex.keys()].sort((a,b)=>b.length-a.length).join('|'),'g');
+function readWords(article) {
+  const bits = Array.from(article.matchAll(wordingPattern), ([word]) => wordingIndex.get(word).indexOf(word));
+  const bytes = new Uint8Array(Math.floor(bits.length/8));
+  for (let i=0;i<bytes.length*8;i++) bytes[i>>3] |= bits[i] << (7-i%8);
+  if (!magic.every((value,i)=>bytes[i]===value)) return null;
+  if (bytes.length<6) throw Error('正文不完整。');
+  const size = bytes[4]*256+bytes[5];
+  if (size<=overhead || size>overhead+maxSecret || bytes.length<size+6) throw Error('正文不完整，请复制整篇文章。');
+  return validatePacket(bytes.slice(6,6+size));
+}
+function writeWords(article, packet) {
+  const frame = new Uint8Array(packet.length+6);
+  frame.set(magic);
+  new DataView(frame.buffer).setUint16(4,packet.length);
+  frame.set(packet,6);
+  let bit = 0;
+  const result = article.replace(wordingPattern, word => {
+    if (bit>=frame.length*8) return word;
+    const value = (frame[bit>>3]>>(7-bit%8))&1;
+    bit++;
+    return wordingIndex.get(word)[value];
+  });
+  const recovered = readWords(result);
+  if (!recovered || !packet.every((byte,i)=>recovered[i]===byte)) throw Error('改写后无法完整解读，请换一篇原稿。');
+  return result;
 }
 function validatePacket(bytes) {
   if (bytes.length <= overhead || bytes.length > overhead+maxSecret) throw Error('密文长度不正确，可能在复制时受损。');
@@ -65,7 +111,11 @@ function extract(article) {
     if (data.length > Math.ceil((overhead+maxSecret)*4/3) || data.length%4===1) throw Error('分享码长度不正确，请检查是否完整。');
     return validatePacket(Uint8Array.from(atob(data.replace(/-/g,'+').replace(/_/g,'/')),x=>x.charCodeAt(0)));
   }
-  if (first.done) throw Error('未找到完整密文。请粘贴整篇，或索取原始 TXT。');
+  if (first.done) {
+    const wording = readWords(article);
+    if (wording) return wording;
+    throw Error('未找到完整密文。请粘贴整篇文章。');
+  }
   if (!matches.next().done) throw Error('文章内有多段密文。请分别载入原始文章。');
   const data = first.value[1];
   if (data.length % 4 || data.length < (overhead+1)*4 || data.length > (overhead+maxSecret)*4) throw Error('密文长度不正确，可能在复制时受损。');
@@ -85,6 +135,11 @@ async function hide(article, secret, password, mode='invisible') {
   if (article.includes(start) || article.includes('[CZ1:')) throw Error('文章已含密文标记，请换用公开原稿。');
   const payload = te.encode(secret);
   if (!payload.length || payload.length > maxSecret) throw Error('秘密正文须为 1 至 8192 个 UTF-8 字节，常见汉字约占 3 字节。');
+  if (mode==='words') {
+    const available = Array.from(article.matchAll(wordingPattern)).length;
+    const required = (overhead+6+payload.length)*8;
+    if (available<required) throw Error('这篇原稿有 '+available+' 处可替换措辞，这条秘密需要 '+required+' 处。请用更长的原稿或缩短秘密。');
+  }
   if (Array.from(password).length < 12) throw Error('请设置至少 12 个字符的密码。');
   const header = new Uint8Array(32);
   header.set(magic);
@@ -93,7 +148,7 @@ async function hide(article, secret, password, mode='invisible') {
   const encrypted = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv:header.subarray(20),additionalData:header},key,payload));
   const bytes = new Uint8Array(header.length+encrypted.length);
   bytes.set(header);bytes.set(encrypted,header.length);
-  if(mode==='chat') return article+'\n\n'+packChat(bytes);
+  if(mode==='words') return writeWords(article,bytes);
   const pos = article.search(/[。！？\n]/);
   const insertion = pos >= 0 ? pos : Array.from(article.trimStart())[0].length + article.length-article.trimStart().length;
   return article.slice(0,insertion)+pack(bytes)+article.slice(insertion);
@@ -128,8 +183,23 @@ function encoded(value) {
   $('encoded').value=value;$('copy').disabled=$('save').disabled=!value;
 }
 let writeVersion=0,readVersion=0;
-for(const id of ['cover','secret','writePassword']) $(id).oninput=()=>{writeVersion++;encoded('');status('writeStatus','');};
-$('mode').onchange=()=>{writeVersion++;encoded('');status('writeStatus','');};
+function updateCapacity() {
+  const active = $('mode').value==='words';
+  $('capacity').hidden = !active;
+  if (!active) return;
+  const available = Array.from($('cover').value.matchAll(wordingPattern)).length;
+  const required = (overhead+6+Math.max(1,te.encode($('secret').value).length))*8;
+  $('capacity').textContent = '原稿有 '+available+' 处可替换措辞。按当前秘密长度，至少需要 '+required+' 处。';
+}
+function writingChanged() {
+  writeVersion++;
+  encoded('');
+  status('writeStatus','');
+  updateCapacity();
+}
+for(const id of ['cover','secret','writePassword']) $(id).oninput=writingChanged;
+$('mode').onchange=writingChanged;
+updateCapacity();
 for(const id of ['received','readPassword']) $(id).addEventListener('input',()=>readVersion++);
 $('encode').onclick=async () => {
   const version=writeVersion;
